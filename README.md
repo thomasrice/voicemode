@@ -2,9 +2,9 @@
 
 Simple, robust voice dictation that works on Windows and macOS with only Python installed.
 
-Author: Thomas Rice <thomas@thomasrice.com>
-Website: https://www.thomasrice.com/
-Thomas Rice is co‑founder of Minotaur Capital — https://www.minotaurcapital.com/
+- Author: Thomas Rice <thomas@thomasrice.com>
+- Website: https://www.thomasrice.com/
+- Thomas Rice is co‑founder of Minotaur Capital — https://www.minotaurcapital.com/
 
 Highlights:
 - Global hotkey to start/stop recording (default: F8)
