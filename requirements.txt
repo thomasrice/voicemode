@@ -1,0 +1,8 @@
+numpy>=1.26
+sounddevice>=0.5.2
+keyboard>=0.13.5
+pynput>=1.7.6
+pyperclip>=1.8.2
+python-dotenv>=1.0.0
+openai>=1.75.0
+colorama>=0.4.6

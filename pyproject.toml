@@ -1,0 +1,33 @@
+[project]
+name = "voicemode"
+version = "0.1.0"
+description = "VoiceMode: Cross-platform voice dictation with OpenAI STT"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "Thomas Rice", email = "thomas@thomasrice.com" },
+]
+dependencies = [
+  "numpy>=1.26",
+  "sounddevice>=0.5.2",
+  "keyboard>=0.13.5",
+  "pynput>=1.7.6",
+  "pyperclip>=1.8.2",
+  "python-dotenv>=1.0.0",
+  "openai>=1.75.0",
+  "colorama>=0.4.6",
+]
+
+[project.scripts]
+voicemode = "voiceapp.cli:main"
+voice-mode = "voiceapp.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"voiceapp.assets" = ["*.wav"]
