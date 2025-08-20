@@ -72,23 +72,6 @@ If you’d like custom sounds, place WAV files at:
 
 They’ll be packaged when installed. If missing, the app generates short beeps.
 
-## Why this is more robust
-
-- Audio stream runs in a managed thread and restarts on failure
-- Time‑bounded capture per toggle avoids memory growth
-- Network calls wrapped with retries and clear error messages
-- Clean shutdown and hotkey unregister
-
-## Testing
-
-From project root:
-
-```bash
-poetry run pytest -q tests/voice
-```
-
-Tests use mocks so no network/audio hardware is required.
-
 ## Setting your OpenAI key
 
 VoiceMode looks for your key in this order:
