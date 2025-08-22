@@ -87,6 +87,37 @@ def _paste_text(text: str):
         print(Fore.LIGHTRED_EX + f"Unable to send paste keystroke: {e}" + Style.RESET_ALL)
 
 
+def _check_macos_accessibility() -> bool:
+    """Check if the current process has accessibility permissions on macOS."""
+    try:
+        import platform
+        if platform.system() != "Darwin":
+            return True  # Not macOS, no check needed
+        
+        # Try to import and use the macOS-specific accessibility check
+        import subprocess
+        import os
+        
+        # Get the parent process (Terminal/iTerm) that's running Python
+        # We check if the terminal app has accessibility permissions
+        result = subprocess.run(
+            ["osascript", "-e", 'tell application "System Events" to get name of first application process whose frontmost is true'],
+            capture_output=True,
+            text=True,
+            timeout=1
+        )
+        
+        if result.returncode == 0:
+            # If we can query System Events, we have accessibility permissions
+            return True
+        else:
+            # Permission denied or other error
+            return False
+    except Exception:
+        # If anything fails, assume we don't have permissions (safe default)
+        return False
+
+
 def run(hotkey: str, model: str, rate: int, device: Optional[int], no_sound: bool, push_to_talk: bool):
     colorama_init()  # colour support on Windows terminals
     mode_desc = "Push-to-talk" if push_to_talk else "Toggle"
@@ -160,36 +191,66 @@ def run(hotkey: str, model: str, rate: int, device: Optional[int], no_sound: boo
     listener = None
     keyboard_success = False
     
-    # Try keyboard library first (works best on Windows/Linux)
-    try:
-        import keyboard  # type: ignore
-        
-        # Test if we have permissions before setting up hotkeys
+    # Detect platform
+    import platform
+    is_macos = platform.system() == "Darwin"
+    
+    # On macOS, skip keyboard library entirely and use pynput
+    # On other platforms, try keyboard library first
+    if not is_macos:
         try:
-            keyboard.is_pressed("esc")  # Test call to check permissions
-        except OSError as e:
-            if "Must be run as administrator" in str(e) or "Error 13" in str(e):
-                raise PermissionError("Keyboard library requires admin privileges")
-        
-        if push_to_talk:
-            key = hotkey.lower()
-            keyboard.on_press_key(key, lambda e: _start())
-            keyboard.on_release_key(key, lambda e: _stop_and_transcribe())
-        else:
-            keyboard.add_hotkey(hotkey, toggle)
-        keyboard_success = True
-    except (ImportError, PermissionError, Exception):
-        pass
+            import keyboard  # type: ignore
+            
+            if push_to_talk:
+                key = hotkey.lower()
+                keyboard.on_press_key(key, lambda e: _start())
+                keyboard.on_release_key(key, lambda e: _stop_and_transcribe())
+            else:
+                keyboard.add_hotkey(hotkey, toggle)
+            keyboard_success = True
+        except (ImportError, OSError, Exception):
+            pass
     
     # If keyboard library didn't work, try pynput as a cross-platform fallback
     if not keyboard_success:
         try:
             from pynput import keyboard as pk
-            import platform
+            
+            # Map hotkey string to pynput key
+            hotkey_upper = hotkey.upper()
+            target_key = None
+            
+            # Handle function keys
+            if hotkey_upper.startswith("F") and hotkey_upper[1:].isdigit():
+                func_num = hotkey_upper[1:]
+                target_key = getattr(pk.Key, f"f{func_num}", None)
+            # Handle single letters/numbers
+            elif len(hotkey_upper) == 1:
+                target_key = hotkey_upper.lower()
+            # Handle special keys
+            else:
+                key_map = {
+                    "SPACE": pk.Key.space,
+                    "ENTER": pk.Key.enter,
+                    "TAB": pk.Key.tab,
+                    "ESC": pk.Key.esc,
+                    "ESCAPE": pk.Key.esc,
+                }
+                target_key = key_map.get(hotkey_upper)
+            
+            if not target_key:
+                raise ValueError(f"Unsupported hotkey: {hotkey}")
 
             def on_press(key):
                 try:
-                    if key == pk.Key.f8 and hotkey.upper() == "F8":
+                    # Check if pressed key matches our target
+                    if isinstance(target_key, str):
+                        if hasattr(key, 'char') and key.char == target_key:
+                            if push_to_talk:
+                                _start()
+                            else:
+                                toggle()
+                    elif key == target_key:
                         if push_to_talk:
                             _start()
                         else:
@@ -199,7 +260,12 @@ def run(hotkey: str, model: str, rate: int, device: Optional[int], no_sound: boo
 
             def on_release(key):
                 try:
-                    if key == pk.Key.f8 and hotkey.upper() == "F8":
+                    # Check if released key matches our target
+                    if isinstance(target_key, str):
+                        if hasattr(key, 'char') and key.char == target_key:
+                            if push_to_talk:
+                                _stop_and_transcribe()
+                    elif key == target_key:
                         if push_to_talk:
                             _stop_and_transcribe()
                 except Exception:
@@ -210,14 +276,16 @@ def run(hotkey: str, model: str, rate: int, device: Optional[int], no_sound: boo
             listener.start()
             
             # Show platform-specific message
-            if platform.system() == "Darwin":  # macOS
-                print(
-                    Fore.LIGHTYELLOW_EX
-                    + "\n⚠️  macOS detected: VoiceMode needs Accessibility permissions to detect hotkeys.\n"
-                    + "   Please grant permission in:\n"
-                    + "   System Settings → Privacy & Security → Accessibility → Add your Terminal app\n"
-                    + Style.RESET_ALL
-                )
+            if is_macos:
+                # Only show warning if accessibility permissions are not granted
+                if not _check_macos_accessibility():
+                    print(
+                        Fore.LIGHTYELLOW_EX
+                        + "\n⚠️  macOS: Please ensure Terminal/iTerm has Accessibility permissions.\n"
+                        + "   System Settings → Privacy & Security → Accessibility\n"
+                        + "   Add and enable your terminal application.\n"
+                        + Style.RESET_ALL
+                    )
             else:
                 print(
                     Fore.LIGHTYELLOW_EX
