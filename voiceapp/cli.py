@@ -158,19 +158,34 @@ def run(hotkey: str, model: str, rate: int, device: Optional[int], no_sound: boo
 
     # Hotkey registration
     listener = None
+    keyboard_success = False
+    
+    # Try keyboard library first (works best on Windows/Linux)
     try:
         import keyboard  # type: ignore
-
+        
+        # Test if we have permissions before setting up hotkeys
+        try:
+            keyboard.is_pressed("esc")  # Test call to check permissions
+        except OSError as e:
+            if "Must be run as administrator" in str(e) or "Error 13" in str(e):
+                raise PermissionError("Keyboard library requires admin privileges")
+        
         if push_to_talk:
             key = hotkey.lower()
             keyboard.on_press_key(key, lambda e: _start())
             keyboard.on_release_key(key, lambda e: _stop_and_transcribe())
         else:
             keyboard.add_hotkey(hotkey, toggle)
-    except Exception:
-        # Try pynput as a cross-platform fallback
+        keyboard_success = True
+    except (ImportError, PermissionError, Exception):
+        pass
+    
+    # If keyboard library didn't work, try pynput as a cross-platform fallback
+    if not keyboard_success:
         try:
             from pynput import keyboard as pk
+            import platform
 
             def on_press(key):
                 try:
@@ -193,11 +208,22 @@ def run(hotkey: str, model: str, rate: int, device: Optional[int], no_sound: boo
             listener = pk.Listener(on_press=on_press, on_release=on_release if push_to_talk else None)
             listener.daemon = True
             listener.start()
-            print(
-                Fore.LIGHTBLUE_EX
-                + "Hotkey fallback active (pynput). Ensure Accessibility permissions on macOS."
-                + Style.RESET_ALL
-            )
+            
+            # Show platform-specific message
+            if platform.system() == "Darwin":  # macOS
+                print(
+                    Fore.LIGHTYELLOW_EX
+                    + "\n⚠️  macOS detected: VoiceMode needs Accessibility permissions to detect hotkeys.\n"
+                    + "   Please grant permission in:\n"
+                    + "   System Settings → Privacy & Security → Accessibility → Add your Terminal app\n"
+                    + Style.RESET_ALL
+                )
+            else:
+                print(
+                    Fore.LIGHTYELLOW_EX
+                    + "Using pynput for hotkeys."
+                    + Style.RESET_ALL
+                )
         except Exception as e:
             print(Fore.LIGHTRED_EX + f"Failed to register hotkey: {e}" + Style.RESET_ALL)
             print("Fallback: press Enter to toggle; type 'quit' to exit.")
@@ -215,12 +241,12 @@ def run(hotkey: str, model: str, rate: int, device: Optional[int], no_sound: boo
     except KeyboardInterrupt:
         pass
     finally:
-        try:
-            import keyboard  # type: ignore
-
-            keyboard.remove_all_hotkeys()
-        except Exception:
-            pass
+        if keyboard_success:
+            try:
+                import keyboard  # type: ignore
+                keyboard.remove_all_hotkeys()
+            except Exception:
+                pass
         if listener is not None:
             try:
                 listener.stop()
