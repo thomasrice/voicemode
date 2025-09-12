@@ -30,7 +30,7 @@ Run directly without installing the package:
 
 ```bash
 python -m voiceapp --help
-python -m voiceapp  # Press F8 to toggle listening
+python -m voiceapp  # Interactive mode (default)
 ```
 
 Or install as an editable package (recommended):
@@ -63,6 +63,18 @@ All launchers run `python -m voiceapp` from this folder.
 --list-devices List audio input devices and exit
 --push-to-talk Hold hotkey to record; release to transcribe
 ```
+
+### Background server (Linux/macOS)
+
+Optionally, you can run a small background server that responds to toggle commands. This is useful if you want to bind your desktop hotkey to `voicemode toggle` without keeping a foreground terminal open.
+
+- Start server: `voicemode serve`
+- Toggle listening: `voicemode toggle`
+- Check status: `voicemode status`
+
+Notes:
+- The server uses a Unix domain socket under the app config directory and is supported on Linux and macOS.
+- On Windows, use the default interactive mode instead.
 
 ## Sounds
 

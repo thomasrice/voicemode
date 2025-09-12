@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import socket
+import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Optional
+import shutil
 
 try:
     from colorama import Fore, Style, init as colorama_init
@@ -47,15 +53,141 @@ def _list_devices() -> int:
     return 0
 
 
+def _detect_needs_shift_paste_linux() -> bool:
+    """Heuristically detect if focused window expects Ctrl+Shift+V (terminal).
+
+    - Wayland/Hyprland: uses `hyprctl activewindow -j` class
+    - X11: uses `xdotool getwindowfocus getwindowclassname`
+    """
+    try:
+        if sys.platform != "linux":
+            return False
+        term_classes = {
+            "alacritty",
+            "kitty",
+            "foot",
+            "footclient",
+            "wezterm",
+            "org.kde.konsole",
+            "konsole",
+            "gnome-terminal",
+            "gnome-terminal-server",
+            "tilix",
+            "xfce4-terminal",
+            "xterm",
+            "urxvt",
+            "rxvt",
+            "st-256color",
+            "st",
+            "eterm",
+        }
+        env = os.environ
+        if env.get("WAYLAND_DISPLAY"):
+            hyprctl = shutil.which("hyprctl")
+            if not hyprctl:
+                return False
+            try:
+                r = subprocess.run([hyprctl, "activewindow", "-j"], capture_output=True, text=True, timeout=0.25)
+                if r.returncode == 0 and r.stdout:
+                    try:
+                        info = json.loads(r.stdout)
+                    except Exception:
+                        info = {}
+                    cls = (info.get("class") or info.get("initialClass") or "").strip().lower()
+                    if cls in term_classes:
+                        return True
+            except Exception:
+                return False
+            return False
+        # X11
+        xdotool = shutil.which("xdotool")
+        if xdotool:
+            try:
+                r = subprocess.run([xdotool, "getwindowfocus", "getwindowclassname"], capture_output=True, text=True, timeout=0.25)
+                if r.returncode == 0:
+                    cls = (r.stdout or "").strip().lower()
+                    if cls in term_classes:
+                        return True
+            except Exception:
+                return False
+        return False
+    except Exception:
+        return False
+
+
 def _paste_text(text: str):
-    # Set clipboard
+    """Copy text to clipboard and simulate paste.
+
+    - On Wayland (Hyprland/Sway/etc): prefer wl-copy + wtype
+    - On X11: prefer xclip + xdotool
+    - Fallback to pyperclip + keyboard/pynput
+    """
+    # Linux first: Wayland/X11 specific tools
+    try:
+        import platform as _platform
+
+        system = _platform.system()
+        env = os.environ
+        if system == "Linux":
+            use_shift = _detect_needs_shift_paste_linux()
+            # Wayland path
+            if env.get("WAYLAND_DISPLAY"):
+                wl_copy = shutil.which("wl-copy") if 'shutil' in globals() else None
+                if wl_copy is None:
+                    import shutil as _shutil
+                    wl_copy = _shutil.which("wl-copy")
+                wtype = shutil.which("wtype") if 'shutil' in globals() else None
+                if wtype is None:
+                    import shutil as _shutil
+                    wtype = _shutil.which("wtype")
+                if wl_copy:
+                    try:
+                        subprocess.run([wl_copy, "-n"], input=text.encode("utf-8"), check=True)
+                        if wtype:
+                            if use_shift:
+                                subprocess.run([wtype, "-M", "ctrl", "-M", "shift", "v", "-m", "shift", "-m", "ctrl"], check=False)
+                            else:
+                                subprocess.run([wtype, "-M", "ctrl", "v", "-m", "ctrl"], check=False)
+                            return
+                        # No wtype: clipboard set, user can paste manually
+                        return
+                    except Exception:
+                        pass
+            # X11 path
+            xclip = shutil.which("xclip") if 'shutil' in globals() else None
+            if xclip is None:
+                import shutil as _shutil
+                xclip = _shutil.which("xclip")
+            xdotool = shutil.which("xdotool") if 'shutil' in globals() else None
+            if xdotool is None:
+                import shutil as _shutil
+                xdotool = _shutil.which("xdotool")
+            if xclip:
+                try:
+                    subprocess.run([xclip, "-selection", "clipboard"], input=text.encode("utf-8"), check=True)
+                    if xdotool:
+                        if use_shift:
+                            subprocess.run([xdotool, "key", "ctrl+shift+v"], check=False)
+                        else:
+                            subprocess.run([xdotool, "key", "ctrl+v"], check=False)
+                        return
+                    return
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Cross-platform fallback using pyperclip and Python key synth
     try:
         import pyperclip
     except ModuleNotFoundError as e:
         _hint_install(e.name or "pyperclip")
         return
 
-    pyperclip.copy(text)
+    try:
+        pyperclip.copy(text)
+    except Exception:
+        pass
 
     # Try keyboard library first (works well on Windows)
     try:
@@ -322,6 +454,286 @@ def run(hotkey: str, model: str, rate: int, device: Optional[int], no_sound: boo
                 pass
 
 
+# ----------------
+# Server utilities
+# ----------------
+
+def _socket_path() -> Path:
+    try:
+        from .settings import config_dir
+
+        return config_dir() / "voiceapp.sock"
+    except Exception:
+        return Path.home() / ".config" / "voiceapp" / "voiceapp.sock"
+
+
+def _send_command(cmd: str, payload: Optional[dict] = None, timeout: float = 2.0) -> dict:
+    path = _socket_path()
+    data = {"cmd": cmd}
+    if payload:
+        data.update(payload)
+    req = (json.dumps(data) + "\n").encode("utf-8")
+    resp: dict = {}
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(str(path))
+        s.sendall(req)
+        # Read one line JSON
+        chunks = []
+        while True:
+            b = s.recv(4096)
+            if not b:
+                break
+            chunks.append(b)
+            if b.endswith(b"\n"):
+                break
+    if chunks:
+        try:
+            resp = json.loads(b"".join(chunks).decode("utf-8").strip())
+        except Exception:
+            resp = {}
+    return resp
+
+
+def _start_server_background(model: str, rate: int, device: Optional[int], no_sound: bool) -> subprocess.Popen:
+    # Spawn a detached process: python -m voiceapp serve ...
+    args = [
+        sys.executable,
+        "-m",
+        "voiceapp",
+        "serve",
+        "--model",
+        model,
+        "--rate",
+        str(rate),
+    ]
+    if device is not None:
+        args += ["--device", str(device)]
+    if no_sound:
+        args += ["--no-sound"]
+
+    # Redirect server output to a log file
+    log_dir = _socket_path().parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "server.log"
+    f_out = open(log_file, "a", buffering=1)
+    # Ensure env carries API key etc.
+    env = os.environ.copy()
+    return subprocess.Popen(args, stdout=f_out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env, close_fds=True)
+
+
+def _ensure_server(model: str, rate: int, device: Optional[int], no_sound: bool, wait_secs: float = 2.5) -> bool:
+    path = _socket_path()
+    # If socket exists but not connectable, remove it and restart
+    try:
+        resp = _send_command("ping", timeout=0.5)
+        if resp.get("ok"):
+            return True
+    except Exception:
+        pass
+
+    # Start background server
+    proc = _start_server_background(model=model, rate=rate, device=device, no_sound=no_sound)
+    # Wait for socket to become ready
+    t0 = time.time()
+    while time.time() - t0 < wait_secs:
+        try:
+            resp = _send_command("ping", timeout=0.5)
+            if resp.get("ok"):
+                return True
+        except Exception:
+            time.sleep(0.1)
+    # Server didn't start quickly; leave process running but report failure
+    try:
+        proc.poll()
+    except Exception:
+        pass
+    return False
+
+
+def serve(model: str, rate: int, device: Optional[int], no_sound: bool):
+    """Run a simple Unix-socket server to handle toggle requests globally."""
+    colorama_init()
+    try:
+        from .audio import AudioConfig, AudioRecorder
+        from .transcribe import OpenAITranscriber
+        from .sounds import play_start, play_stop
+        from .utils import float_to_wav_bytes
+        from .settings import resolve_openai_key
+    except ModuleNotFoundError as e:
+        _hint_install(e.name or "a required package")
+        return 1
+
+    key = resolve_openai_key()
+    if not key:
+        print(Fore.LIGHTRED_EX + "No OPENAI_API_KEY found. Set env var or run:\n  voicemode config --set-openai-key sk-...\n" + Style.RESET_ALL)
+        return 1
+    if not os.environ.get("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = key
+
+    cfg = AudioConfig(sample_rate=rate, device=device)
+    recorder = AudioRecorder(cfg)
+    recorder.start()
+    transcriber = OpenAITranscriber(model=model)
+    listening = {"active": False}
+
+    # Notification helpers (Linux only)
+    notif = {"id": None}
+
+    def _notify_linux(message: str, persistent: bool = False, expire_ms: Optional[int] = None):
+        try:
+            if sys.platform != "linux":
+                return
+            ns = shutil.which("notify-send")
+            if not ns:
+                return
+            # Prepare args
+            args = [ns, "--app-name", "VoiceMode"]
+            if persistent and expire_ms is None:
+                args += ["-t", "0"]
+            elif expire_ms is not None:
+                args += ["-t", str(int(expire_ms))]
+            if notif["id"] is None:
+                # First notification: ask for ID so we can replace later
+                args += ["--print-id", message]
+                out = subprocess.run(args, capture_output=True, text=True).stdout.strip()
+                if out.isdigit():
+                    notif["id"] = int(out)
+            else:
+                # Replace existing
+                args += ["-r", str(notif["id"]), message]
+                subprocess.run(args, check=False)
+        except Exception:
+            pass
+
+    def _notify_listening():
+        _notify_linux("Listening…", persistent=True)
+
+    def _notify_transcribing():
+        _notify_linux("Transcribing…", persistent=True)
+
+    def _notify_complete():
+        _notify_linux("Transcription complete", expire_ms=2000)
+        # Reset ID so next session creates a new persistent notification
+        notif["id"] = None
+
+    def _start():
+        if listening["active"]:
+            return "already"
+        listening["active"] = True
+        play_start(no_sound)
+        recorder.begin_session()
+        _notify_listening()
+        return "started"
+
+    def _stop_and_transcribe():
+        if not listening["active"]:
+            return "not_active"
+        listening["active"] = False
+        play_stop(no_sound)
+        _notify_transcribing()
+        frames = recorder.end_session()
+        wav_bytes = float_to_wav_bytes(frames, rate)
+        if not wav_bytes:
+            print(Fore.LIGHTRED_EX + "No audio captured." + Style.RESET_ALL)
+            _notify_complete()
+            return "no_audio"
+        try:
+            text = transcriber.transcribe_wav_bytes(wav_bytes)
+            if text:
+                _paste_text(text)
+                print(Fore.LIGHTBLUE_EX + f"Typed: {text}" + Style.RESET_ALL)
+                _notify_complete()
+                return "transcribed"
+            else:
+                print(Fore.LIGHTRED_EX + "(Empty transcription)" + Style.RESET_ALL)
+                _notify_complete()
+                return "empty"
+        except Exception as e:
+            print(Fore.LIGHTRED_EX + f"Transcription error: {e}" + Style.RESET_ALL)
+            _notify_complete()
+            return "error"
+
+    # Prepare socket
+    sock_path = _socket_path()
+    sock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if sock_path.exists():
+            sock_path.unlink()
+    except Exception:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(str(sock_path))
+        srv.listen(5)
+    except Exception as e:
+        print(Fore.LIGHTRED_EX + f"Server bind/listen failed: {e}" + Style.RESET_ALL)
+        try:
+            srv.close()
+        except Exception:
+            pass
+        return 1
+
+    print(Fore.LIGHTBLUE_EX + f"VoiceApp server listening at {sock_path}" + Style.RESET_ALL)
+
+    try:
+        while True:
+            conn, _ = srv.accept()
+            with conn:
+                try:
+                    buf = b""
+                    while True:
+                        b = conn.recv(4096)
+                        if not b:
+                            break
+                        buf += b
+                        if b"\n" in b:
+                            break
+                    cmd = {}
+                    try:
+                        cmd = json.loads(buf.decode("utf-8").strip())
+                    except Exception:
+                        pass
+                    action = (cmd.get("cmd") or "").lower()
+                    status = "unknown"
+                    if action in {"ping", "status"}:
+                        status = "listening" if listening["active"] else "idle"
+                        resp = {"ok": True, "status": status}
+                    elif action == "toggle":
+                        if listening["active"]:
+                            status = _stop_and_transcribe()
+                        else:
+                            status = _start()
+                        resp = {"ok": True, "result": status, "listening": listening["active"]}
+                    elif action == "start":
+                        status = _start()
+                        resp = {"ok": True, "result": status, "listening": listening["active"]}
+                    elif action == "stop":
+                        status = _stop_and_transcribe()
+                        resp = {"ok": True, "result": status, "listening": listening["active"]}
+                    else:
+                        resp = {"ok": False, "error": "unknown_command"}
+                except Exception as e:
+                    resp = {"ok": False, "error": str(e)}
+                try:
+                    conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
+                except Exception:
+                    pass
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            srv.close()
+        except Exception:
+            pass
+        try:
+            if sock_path.exists():
+                sock_path.unlink()
+        except Exception:
+            pass
+    return 0
+
+
 def main(argv: Optional[list[str]] = None):
     # Load environment variables from a local .env if present
     try:
@@ -330,7 +742,10 @@ def main(argv: Optional[list[str]] = None):
         load_dotenv()
     except Exception:
         pass
+
     parser = argparse.ArgumentParser(prog="voicemode", description="VoiceMode – voice dictation with OpenAI STT")
+
+    # Interactive options at top level so running without subcommand behaves like before
     parser.add_argument("--hotkey", default="F8", help="Global hotkey to toggle listening (default: F8)")
     parser.add_argument("--model", default="gpt-4o-mini-transcribe", help="OpenAI model to use")
     parser.add_argument("--rate", type=int, default=16000, help="Sample rate (Hz), default 16000")
@@ -340,16 +755,48 @@ def main(argv: Optional[list[str]] = None):
     parser.add_argument("--push-to-talk", action="store_true", help="Hold hotkey to record; release to transcribe")
 
     sub = parser.add_subparsers(dest="cmd")
+
+    # Server mode (default)
+    ps = sub.add_parser("serve", help="Run background server (Unix socket)")
+    ps.add_argument("--model", default="gpt-4o-mini-transcribe", help="OpenAI model to use")
+    ps.add_argument("--rate", type=int, default=16000, help="Sample rate (Hz), default 16000")
+    ps.add_argument("--device", type=int, default=None, help="Input device index (see --list-devices)")
+    ps.add_argument("--no-sound", action="store_true", help="Disable start/stop sounds")
+
+    # Client toggle
+    pt = sub.add_parser("toggle", help="Toggle listening (start/stop+transcribe)")
+    pt.add_argument("--model", default="gpt-4o-mini-transcribe", help="Model if starting server")
+    pt.add_argument("--rate", type=int, default=16000, help="Rate if starting server")
+    pt.add_argument("--device", type=int, default=None, help="Device if starting server")
+    pt.add_argument("--no-sound", action="store_true", help="No sound for server if starting")
+
+    # Status
+    sub.add_parser("status", help="Show server status")
+
+    # Legacy interactive mode (kept for completeness)
+    pi = sub.add_parser("interactive", help="Run interactive hotkey mode in foreground")
+    pi.add_argument("--hotkey", default="F8", help="Global hotkey to toggle listening (default: F8)")
+    pi.add_argument("--model", default="gpt-4o-mini-transcribe", help="OpenAI model to use")
+    pi.add_argument("--rate", type=int, default=16000, help="Sample rate (Hz), default 16000")
+    pi.add_argument("--device", type=int, default=None, help="Input device index (see --list-devices)")
+    pi.add_argument("--no-sound", action="store_true", help="Disable start/stop sounds")
+    pi.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
+    pi.add_argument("--push-to-talk", action="store_true", help="Hold hotkey to record; release to transcribe")
+
+    # Config
     cfg = sub.add_parser("config", help="Configure settings")
     cfg.add_argument("--set-openai-key", dest="set_openai_key", help="Set and save your OpenAI API key")
 
     args = parser.parse_args(argv)
 
-    if args.list_devices:
-        return _list_devices()
+    # No subcommand: run interactive mode (legacy default behavior)
+    if not args.cmd:
+        if args.list_devices:
+            return _list_devices()
+        return run(args.hotkey, args.model, args.rate, args.device, args.no_sound, args.push_to_talk)
 
     if args.cmd == "config":
-        if args.set_openai_key:
+        if getattr(args, "set_openai_key", None):
             from .settings import load_settings, save_settings
 
             data = load_settings()
@@ -360,7 +807,57 @@ def main(argv: Optional[list[str]] = None):
         parser.parse_args(["config", "--help"])  # show help
         return 0
 
-    run(args.hotkey, args.model, args.rate, args.device, args.no_sound, args.push_to_talk)
+    if args.cmd == "serve":
+        # Only supported on Linux/macOS (Unix domain sockets)
+        if sys.platform.startswith("win"):
+            print(Fore.LIGHTRED_EX + "'serve' is only supported on Linux/macOS" + Style.RESET_ALL)
+            return 2
+        return serve(model=args.model, rate=args.rate, device=args.device, no_sound=args.no_sound)
+
+    if args.cmd == "toggle":
+        if sys.platform.startswith("win"):
+            print(Fore.LIGHTRED_EX + "'toggle' is only supported on Linux/macOS" + Style.RESET_ALL)
+            return 2
+        # Ensure server, then send toggle
+        ok = _ensure_server(model=args.model, rate=args.rate, device=args.device, no_sound=args.no_sound)
+        if not ok:
+            print(Fore.LIGHTRED_EX + "Server not available" + Style.RESET_ALL)
+            return 1
+        try:
+            resp = _send_command("toggle", timeout=5.0)
+            if not resp.get("ok"):
+                print(Fore.LIGHTRED_EX + f"Toggle failed: {resp}" + Style.RESET_ALL)
+                return 1
+            state = resp.get("listening")
+            if state:
+                print(Fore.LIGHTBLUE_EX + "Listening… (toggle again to stop)" + Style.RESET_ALL)
+            else:
+                print(Fore.LIGHTBLUE_EX + "Stopped and transcribed." + Style.RESET_ALL)
+            return 0
+        except Exception as e:
+            print(Fore.LIGHTRED_EX + f"Toggle error: {e}" + Style.RESET_ALL)
+            return 1
+
+    if args.cmd == "status":
+        if sys.platform.startswith("win"):
+            print(Fore.LIGHTRED_EX + "'status' is only supported on Linux/macOS" + Style.RESET_ALL)
+            return 2
+        try:
+            resp = _send_command("status", timeout=1.5)
+            if resp.get("ok"):
+                print(Fore.LIGHTBLUE_EX + f"Server: {resp.get('status')}" + Style.RESET_ALL)
+                return 0
+        except Exception:
+            pass
+        print(Fore.LIGHTRED_EX + "Server not running" + Style.RESET_ALL)
+        return 1
+
+    if args.cmd == "interactive":
+        if args.list_devices:
+            return _list_devices()
+        return run(args.hotkey, args.model, args.rate, args.device, args.no_sound, args.push_to_talk)
+
+    parser.print_help()
     return 0
 
 
