@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -64,14 +66,18 @@ def _detect_needs_shift_paste_linux() -> bool:
             return False
         term_classes = {
             "alacritty",
+            "io.alacritty.alacritty",
             "kitty",
             "foot",
             "footclient",
             "wezterm",
+            "org.wezfurlong.wezterm",
             "org.kde.konsole",
             "konsole",
             "gnome-terminal",
             "gnome-terminal-server",
+            "kgx",
+            "org.gnome.console",
             "tilix",
             "xfce4-terminal",
             "xterm",
@@ -80,24 +86,102 @@ def _detect_needs_shift_paste_linux() -> bool:
             "st-256color",
             "st",
             "eterm",
+            "terminator",
+            "ghostty",
+            "com.mitchellh.ghostty",
+            "io.elementary.terminal",
         }
         env = os.environ
+        override = env.get("VOICEAPP_SHIFT_PASTE", "").strip().lower()
+        if override in {"1", "true", "yes"}:
+            return True
+        if override in {"0", "false", "no"}:
+            return False
+
+        def _match_terminal(candidate: str | None) -> bool:
+            return bool(candidate and candidate.strip().lower() in term_classes)
+
         if env.get("WAYLAND_DISPLAY"):
             hyprctl = shutil.which("hyprctl")
-            if not hyprctl:
-                return False
-            try:
-                r = subprocess.run([hyprctl, "activewindow", "-j"], capture_output=True, text=True, timeout=0.25)
-                if r.returncode == 0 and r.stdout:
-                    try:
-                        info = json.loads(r.stdout)
-                    except Exception:
-                        info = {}
-                    cls = (info.get("class") or info.get("initialClass") or "").strip().lower()
-                    if cls in term_classes:
-                        return True
-            except Exception:
-                return False
+            if hyprctl:
+                try:
+                    r = subprocess.run([hyprctl, "activewindow", "-j"], capture_output=True, text=True, timeout=0.25)
+                    if r.returncode == 0 and r.stdout:
+                        try:
+                            info = json.loads(r.stdout)
+                        except Exception:
+                            info = {}
+                        cls = info.get("class") or info.get("initialClass") or info.get("app") or ""
+                        if _match_terminal(cls):
+                            return True
+                except Exception:
+                    pass
+
+            swaymsg = shutil.which("swaymsg")
+            if swaymsg:
+                try:
+                    r = subprocess.run([swaymsg, "-t", "get_tree"], capture_output=True, text=True, timeout=0.4)
+                    if r.returncode == 0 and r.stdout:
+                        try:
+                            tree = json.loads(r.stdout)
+                        except Exception:
+                            tree = None
+
+                        def _find_focused(node: dict) -> Optional[dict]:
+                            if node.get("focused"):
+                                return node
+                            for child in node.get("nodes", []) + node.get("floating_nodes", []):
+                                res = _find_focused(child)
+                                if res:
+                                    return res
+                            return None
+
+                        focused = _find_focused(tree) if isinstance(tree, dict) else None
+                        if focused:
+                            cls = focused.get("app_id")
+                            if not cls:
+                                props = focused.get("window_properties") or {}
+                                cls = props.get("class") or props.get("instance")
+                            if _match_terminal(cls):
+                                return True
+                except Exception:
+                    pass
+
+            gdbus = shutil.which("gdbus")
+            if gdbus:
+                script = "const win = global.display.focus_window; win ? win.get_wm_class() : '';"
+                try:
+                    r = subprocess.run(
+                        [
+                            gdbus,
+                            "call",
+                            "--session",
+                            "--dest",
+                            "org.gnome.Shell",
+                            "--object-path",
+                            "/org/gnome/Shell",
+                            "--method",
+                            "org.gnome.Shell.Eval",
+                            script,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=0.25,
+                    )
+                    if r.returncode == 0 and r.stdout:
+                        output = r.stdout.strip()
+                        converted = re.sub(r"\btrue\b", "True", output)
+                        converted = re.sub(r"\bfalse\b", "False", converted)
+                        try:
+                            parsed = ast.literal_eval(converted)
+                        except Exception:
+                            parsed = None
+                        if isinstance(parsed, tuple) and len(parsed) >= 2:
+                            cls = (parsed[1] or "").strip()
+                            if _match_terminal(cls):
+                                return True
+                except Exception:
+                    pass
             return False
         # X11
         xdotool = shutil.which("xdotool")
@@ -109,7 +193,7 @@ def _detect_needs_shift_paste_linux() -> bool:
                     if cls in term_classes:
                         return True
             except Exception:
-                return False
+                pass
         return False
     except Exception:
         return False
@@ -122,6 +206,12 @@ def _paste_text(text: str):
     - On X11: prefer xclip + xdotool
     - Fallback to pyperclip + keyboard/pynput
     """
+    linux_use_shift = False
+    clipboard_set = False
+    keystroke_sent = False
+    linux_wayland = False
+    hyprctl_cmd: Optional[str] = None
+
     # Linux first: Wayland/X11 specific tools
     try:
         import platform as _platform
@@ -129,9 +219,10 @@ def _paste_text(text: str):
         system = _platform.system()
         env = os.environ
         if system == "Linux":
-            use_shift = _detect_needs_shift_paste_linux()
-            # Wayland path
-            if env.get("WAYLAND_DISPLAY"):
+            linux_use_shift = _detect_needs_shift_paste_linux()
+
+            linux_wayland = bool(env.get("WAYLAND_DISPLAY"))
+            if linux_wayland:
                 wl_copy = shutil.which("wl-copy") if 'shutil' in globals() else None
                 if wl_copy is None:
                     import shutil as _shutil
@@ -140,40 +231,66 @@ def _paste_text(text: str):
                 if wtype is None:
                     import shutil as _shutil
                     wtype = _shutil.which("wtype")
+                hyprctl_cmd = shutil.which("hyprctl") if 'shutil' in globals() else None
                 if wl_copy:
                     try:
                         subprocess.run([wl_copy, "-n"], input=text.encode("utf-8"), check=True)
-                        if wtype:
-                            if use_shift:
-                                subprocess.run([wtype, "-M", "ctrl", "-M", "shift", "v", "-m", "shift", "-m", "ctrl"], check=False)
-                            else:
-                                subprocess.run([wtype, "-M", "ctrl", "v", "-m", "ctrl"], check=False)
-                            return
-                        # No wtype: clipboard set, user can paste manually
-                        return
+                        clipboard_set = True
                     except Exception:
                         pass
-            # X11 path
-            xclip = shutil.which("xclip") if 'shutil' in globals() else None
-            if xclip is None:
-                import shutil as _shutil
-                xclip = _shutil.which("xclip")
-            xdotool = shutil.which("xdotool") if 'shutil' in globals() else None
-            if xdotool is None:
-                import shutil as _shutil
-                xdotool = _shutil.which("xdotool")
-            if xclip:
-                try:
-                    subprocess.run([xclip, "-selection", "clipboard"], input=text.encode("utf-8"), check=True)
-                    if xdotool:
-                        if use_shift:
+                    else:
+                        if wtype:
+                            try:
+                                if linux_use_shift:
+                                    subprocess.run([wtype, "-M", "ctrl", "-M", "shift", "v", "-m", "shift", "-m", "ctrl"], check=False)
+                                else:
+                                    subprocess.run([wtype, "-M", "ctrl", "v", "-m", "ctrl"], check=False)
+                                keystroke_sent = True
+                            except Exception:
+                                pass
+
+                if clipboard_set and not keystroke_sent and hyprctl_cmd:
+                    try:
+                        from .utils import paste_keystroke
+
+                        mod, key = paste_keystroke()
+                        mods = mod.upper()
+                        if linux_use_shift and "SHIFT" not in mods:
+                            mods = f"{mods} SHIFT" if mods else "SHIFT"
+                        dispatch_arg = f"sendshortcut {mods},{key},"
+                        subprocess.run([hyprctl_cmd, "dispatch", dispatch_arg], check=False)
+                        keystroke_sent = True
+                    except Exception:
+                        pass
+
+            if not keystroke_sent:
+                xclip = shutil.which("xclip") if 'shutil' in globals() else None
+                if xclip is None:
+                    import shutil as _shutil
+                    xclip = _shutil.which("xclip")
+                xdotool = shutil.which("xdotool") if 'shutil' in globals() else None
+                if xdotool is None:
+                    import shutil as _shutil
+                    xdotool = _shutil.which("xdotool")
+                if xclip and not clipboard_set:
+                    try:
+                        subprocess.run([xclip, "-selection", "clipboard"], input=text.encode("utf-8"), check=True)
+                        clipboard_set = True
+                    except Exception:
+                        pass
+
+                if clipboard_set and xdotool and not keystroke_sent:
+                    try:
+                        if linux_use_shift:
                             subprocess.run([xdotool, "key", "ctrl+shift+v"], check=False)
                         else:
                             subprocess.run([xdotool, "key", "ctrl+v"], check=False)
-                        return
-                    return
-                except Exception:
-                    pass
+                        keystroke_sent = True
+                    except Exception:
+                        pass
+
+            if keystroke_sent:
+                return
     except Exception:
         pass
 
@@ -184,10 +301,29 @@ def _paste_text(text: str):
         _hint_install(e.name or "pyperclip")
         return
 
-    try:
-        pyperclip.copy(text)
-    except Exception:
-        pass
+    if not clipboard_set:
+        try:
+            pyperclip.copy(text)
+            clipboard_set = True
+        except Exception:
+            pass
+
+    if linux_wayland and clipboard_set and not keystroke_sent and hyprctl_cmd:
+        try:
+            from .utils import paste_keystroke
+
+            mod, key = paste_keystroke()
+            mods = mod.upper()
+            if linux_use_shift and "SHIFT" not in mods:
+                mods = f"{mods} SHIFT" if mods else "SHIFT"
+            dispatch_arg = f"sendshortcut {mods},{key},"
+            subprocess.run([hyprctl_cmd, "dispatch", dispatch_arg], check=False)
+            keystroke_sent = True
+        except Exception:
+            pass
+
+    if keystroke_sent:
+        return
 
     # Try keyboard library first (works well on Windows)
     try:
@@ -196,7 +332,11 @@ def _paste_text(text: str):
         from .utils import paste_keystroke
 
         mod, key = paste_keystroke()
-        keyboard.send(f"{mod}+{key}")
+        combo_parts = [mod]
+        if linux_use_shift and mod == "ctrl":
+            combo_parts.append("shift")
+        combo_parts.append(key)
+        keyboard.send("+".join(combo_parts))
         return
     except Exception:
         pass
@@ -207,14 +347,21 @@ def _paste_text(text: str):
         from .utils import paste_keystroke
 
         k = Controller()
-        if paste_keystroke()[0] == "command":
+        mod, key = paste_keystroke()
+        if mod == "command":
             with k.pressed(Key.cmd):
                 k.press("v")
                 k.release("v")
         else:
-            with k.pressed(Key.ctrl):
-                k.press("v")
-                k.release("v")
+            if linux_use_shift and mod == "ctrl":
+                with k.pressed(Key.ctrl):
+                    with k.pressed(Key.shift):
+                        k.press(key)
+                        k.release(key)
+            else:
+                with k.pressed(Key.ctrl):
+                    k.press(key)
+                    k.release(key)
     except Exception as e:
         print(Fore.LIGHTRED_EX + f"Unable to send paste keystroke: {e}" + Style.RESET_ALL)
 
