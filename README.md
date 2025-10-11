@@ -8,7 +8,7 @@ Simple, robust voice dictation that works on Windows and macOS with only Python 
 
 Highlights:
 - Global hotkey to start/stop recording (default: F8)
-- Uses OpenAI speech‑to‑text (`gpt-4o-mini-transcribe` by default)
+- Uses OpenAI speech‑to‑text (`gpt-4o-transcribe` by default)
 - Pastes the result into the active app automatically
 - Cross‑platform start/stop sounds (uses packaged WAVs if present, else generated beeps)
 - Resilient audio stream with auto‑restart on errors
@@ -56,7 +56,7 @@ All launchers run `python -m voiceapp` from this folder.
 
 ```text
 --hotkey       Global hotkey (default: F8)
---model        OpenAI model (default: gpt-4o-mini-transcribe)
+--model        OpenAI model (default: gpt-4o-transcribe)
 --rate         Sample rate in Hz (default: 16000)
 --device       Optional input device index (see --list-devices)
 --no-sound     Disable start/stop sounds
