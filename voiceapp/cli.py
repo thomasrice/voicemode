@@ -942,10 +942,12 @@ def serve(model: str, rate: int, device: Optional[int], no_sound: bool):
         + Style.RESET_ALL
     )
 
+    running = True
     try:
-        while True:
+        while running:
             conn, _ = srv.accept()
             with conn:
+                shutdown_requested = False
                 try:
                     buf = b""
                     while True:
@@ -989,6 +991,17 @@ def serve(model: str, rate: int, device: Optional[int], no_sound: bool):
                             "result": status,
                             "listening": listening["active"],
                         }
+                    elif action in {"shutdown", "stop-server", "quit"}:
+                        if listening["active"]:
+                            status = _stop_and_transcribe()
+                        else:
+                            status = "stopped"
+                        resp = {
+                            "ok": True,
+                            "result": status,
+                            "listening": listening["active"],
+                        }
+                        shutdown_requested = True
                     else:
                         resp = {"ok": False, "error": "unknown_command"}
                 except Exception as e:
@@ -997,6 +1010,13 @@ def serve(model: str, rate: int, device: Optional[int], no_sound: bool):
                     conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
                 except Exception:
                     pass
+                if shutdown_requested:
+                    running = False
+                    print(
+                        Fore.LIGHTBLUE_EX
+                        + "VoiceApp server shutdown requested. Exiting…"
+                        + Style.RESET_ALL
+                    )
     except KeyboardInterrupt:
         pass
     finally:
@@ -1082,6 +1102,9 @@ def main(argv: Optional[list[str]] = None):
 
     # Status
     sub.add_parser("status", help="Show server status")
+
+    # Stop background server
+    sub.add_parser("stop", help="Stop background server if running")
 
     # Legacy interactive mode (kept for completeness)
     pi = sub.add_parser("interactive", help="Run interactive hotkey mode in foreground")
@@ -1213,6 +1236,29 @@ def main(argv: Optional[list[str]] = None):
             pass
         print(Fore.LIGHTRED_EX + "Server not running" + Style.RESET_ALL)
         return 1
+
+    if args.cmd == "stop":
+        if sys.platform.startswith("win"):
+            print(
+                Fore.LIGHTRED_EX
+                + "'stop' is only supported on Linux/macOS"
+                + Style.RESET_ALL
+            )
+            return 2
+        try:
+            resp = _send_command("shutdown", timeout=1.5)
+            if resp.get("ok"):
+                print(
+                    Fore.LIGHTBLUE_EX
+                    + "Server stopped"
+                    + Style.RESET_ALL
+                )
+                return 0
+            print(Fore.LIGHTRED_EX + f"Stop failed: {resp}" + Style.RESET_ALL)
+            return 1
+        except Exception:
+            print(Fore.LIGHTRED_EX + "Server not running" + Style.RESET_ALL)
+            return 1
 
     if args.cmd == "interactive":
         if args.list_devices:

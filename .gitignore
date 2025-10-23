@@ -44,3 +44,6 @@ desktop.ini
 .env.*
 !.env.example
 
+# Substitutions
+substitutions.txt
+

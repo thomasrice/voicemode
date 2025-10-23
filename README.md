@@ -71,6 +71,7 @@ Optionally, you can run a small background server that responds to toggle comman
 - Start server: `voicemode serve`
 - Toggle listening: `voicemode toggle`
 - Check status: `voicemode status`
+- Stop background server: `voicemode stop`
 
 Notes:
 - The server uses a Unix domain socket under the app config directory and is supported on Linux and macOS.
@@ -109,3 +110,28 @@ Alternatively, create a `.env` file in this folder containing:
 ```
 OPENAI_API_KEY=sk-...
 ```
+
+## Custom word substitutions
+
+If the transcription regularly mishears certain words or names, you can create a
+simple substitutions file. VoiceMode looks for either `substitutions.txt` or
+`transcription_substitutions.txt` in:
+
+- The current working directory when you launch the CLI
+- The per-user config folder listed above
+
+Each non-empty line describes one replacement. You can list multiple variants on
+the left separated by commas (or pipes) and optionally flip the order using the
+`<-` arrow if you prefer to start with the desired spelling. Examples:
+
+```
+# Lines starting with # are ignored
+Torient, toriant, Torianth -> Taurient
+AP tech = AP Tech
+Taurient <- torient | toriant
+```
+
+Matches are case-insensitive and are applied in the order they appear; the right
+hand side is inserted exactly as written.
+
+See `substitutions.dif` in the repository for a ready-to-edit example file.

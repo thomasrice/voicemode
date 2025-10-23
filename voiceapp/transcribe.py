@@ -5,6 +5,8 @@ from typing import Optional
 
 from openai import OpenAI
 
+from .substitutions import apply_substitutions
+
 DEFAULT_MODEL = "gpt-4o-transcribe"
 
 
@@ -37,7 +39,10 @@ class OpenAITranscriber:
                     model=self.model, file=content, timeout=timeout
                 )
                 text = getattr(resp, "text", "")
-                return (text or "").strip()
+                cleaned = (text or "").strip()
+                if cleaned:
+                    return apply_substitutions(cleaned)
+                return ""
             except Exception as e:
                 last_exc = e
                 if attempt < self.max_retries:

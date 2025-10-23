@@ -1,0 +1,10 @@
+# Example substitutions for VoiceMode
+# Copy or rename this file to substitutions.txt (or transcription_substitutions.txt)
+# and customize the entries below.
+
+# Multiple variants can be listed on the left using commas or pipes.
+# Matches are case-insensitive; the right-hand spelling is inserted verbatim.
+Torient, toriant, Torianth -> Taurient
+AP tech = AP Tech
+# You can also flip the order if you prefer the desired spelling first.
+Taurient <- torient | toriant
