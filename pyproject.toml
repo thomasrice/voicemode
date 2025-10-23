@@ -3,7 +3,7 @@ name = "voicemode"
 version = "0.1.0"
 description = "VoiceMode: Cross-platform voice dictation with OpenAI STT"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 authors = [
   { name = "Thomas Rice", email = "thomas@thomasrice.com" },
 ]
